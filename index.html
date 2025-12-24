@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Snow Catcher - Heart Recovery</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Segoe UI', sans-serif; }
+        #container { position: relative; width: 100vw; height: 100vh; transition: transform 0.1s; }
+        #input_video { position: absolute; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+        #output_canvas { position: absolute; width: 100%; height: 100%; transform: scaleX(-1); }
+
+        .stats {
+            position: absolute; top: 20px; right: 20px;
+            display: flex; flex-direction: column; gap: 8px; z-index: 10;
+        }
+        .lives-container { position: absolute; top: 20px; left: 20px; z-index: 10; }
+        .badge {
+            background: rgba(0, 0, 0, 0.7); color: white;
+            padding: 8px 18px; border-radius: 12px;
+            font-size: 18px; font-weight: bold; border: 1px solid #00d4ff;
+            text-align: right; min-width: 160px; transition: 0.2s;
+        }
+        .lives-badge { border-color: #ff4444; color: #ff4444; font-size: 24px; text-align: center; }
+        .penalty-flash { background: rgba(255, 0, 0, 0.8) !important; color: white !important; }
+        .heal-flash { background: rgba(0, 255, 136, 0.8) !important; color: white !important; }
+
+        .overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.85); display: flex;
+            flex-direction: column; align-items: center; justify-content: center;
+            color: white; z-index: 20; text-align: center;
+        }
+        button {
+            padding: 15px 40px; font-size: 22px; cursor: pointer;
+            background: #00d4ff; border: none; border-radius: 50px; 
+            font-weight: bold; color: black; margin-top: 20px;
+        }
+
+        @keyframes shake {
+            0% { transform: translate(1px, 1px); }
+            50% { transform: translate(-3px, -2px); }
+            100% { transform: translate(1px, 1px); }
+        }
+        .shake { animation: shake 0.2s 2; }
+    </style>
+</head>
+<body>
+
+    <div id="container">
+        <video id="input_video" playsinline></video>
+        <canvas id="output_canvas"></canvas>
+        
+        <div class="lives-container">
+            <div id="lives-badge" class="badge lives-badge">❤️❤️❤️</div>
+        </div>
+
+        <div class="stats">
+            <div id="score-badge" class="badge">Score: <span id="score">0</span></div>
+            <div id="powerup-badge" class="badge">POWER-UP: READY!</div>
+            <div class="badge">Time: <span id="timer">60</span>s</div>
+        </div>
+
+        <div id="start-overlay" class="overlay">
+            <h1>SNOWFLAKES HUNTER</h1>
+            <p>Avoid fireballs. Every 50 pts, a <b>HEART</b> will fall.<br>Catch it to regain a life!</p>
+            <button onclick="startGame()">START GAME</button>
+        </div>
+
+        <div id="game-over-overlay" class="overlay" style="display: none;">
+            <h1 id="over-reason">GAME OVER</h1>
+            <p id="final-score" style="font-size: 24px;"></p>
+            <button onclick="resetGame()">PLAY AGAIN</button>
+        </div>
+    </div>
+
+<script>
+const videoElement = document.getElementById('input_video');
+const canvasElement = document.getElementById('output_canvas');
+const container = document.getElementById('container');
+const canvasCtx = canvasElement.getContext('2d');
+const scoreElement = document.getElementById('score');
+const scoreBadge = document.getElementById('score-badge');
+const livesBadge = document.getElementById('lives-badge');
+const timerElement = document.getElementById('timer');
+const powerBadge = document.getElementById('powerup-badge');
+
+let audioCtx;
+let score = 0;
+let lives = 3;
+let timeLeft = 60;
+let gameActive = false;
+let entities = [];
+let speedMultiplier = 1;
+let heartWaiting = false;
+let lastHeartMilestone = 0;
+const ENTITY_COUNT = 25;
+
+function playSound(freq, duration, vol, type = 'sine') {
+    if (!audioCtx) return;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+    gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + duration);
+}
+
+class Entity {
+    constructor() { this.reset(); }
+    reset() {
+        this.x = Math.random() * canvasElement.width;
+        this.y = -50;
+        this.size = Math.random() * 5 + 8;
+        this.speed = (Math.random() * 2 + 1) * speedMultiplier;
+        
+        if (heartWaiting) {
+            this.type = 'heart';
+            this.color = '#ff69b4'; // Hot pink
+            this.value = 0;
+            heartWaiting = false;
+        } else {
+            let rand = Math.random();
+            if (rand > 0.90) { 
+                this.type = 'fireball';
+                this.color = '#ff4400';
+                this.value = -10;
+            } else if (rand > 0.80) {
+                this.type = 'gold';
+                this.color = '#ffd700';
+                this.value = 5;
+            } else {
+                this.type = 'snow';
+                this.color = '#ffffff';
+                this.value = 1;
+            }
+        }
+    }
+    update() {
+        this.y += this.speed;
+        if (this.y > canvasElement.height) this.reset();
+    }
+    draw() {
+        canvasCtx.beginPath();
+        if (this.type === 'gold') {
+            canvasCtx.shadowBlur = 15; canvasCtx.shadowColor = "gold";
+        } else if (this.type === 'fireball') {
+            canvasCtx.shadowBlur = 20; canvasCtx.shadowColor = "red";
+        } else if (this.type === 'heart') {
+            canvasCtx.shadowBlur = 20; canvasCtx.shadowColor = "#ff69b4";
+        }
+
+        // Custom draw for heart
+        if (this.type === 'heart') {
+            this.drawHeart(this.x, this.y, this.size * 1.5);
+        } else {
+            // Draw emoji icons for different types
+            let emoji = '❄️';
+            if (this.type === 'gold') emoji = '⭐️';
+            else if (this.type === 'fireball') emoji = '🧨';
+
+            // Choose font size relative to entity size
+            const fontSize = Math.max(14, Math.round(this.size * 3));
+            canvasCtx.font = `${fontSize}px serif`;
+            canvasCtx.textAlign = 'center';
+            canvasCtx.textBaseline = 'middle';
+            canvasCtx.fillText(emoji, this.x, this.y);
+        }
+        canvasCtx.shadowBlur = 0;
+    }
+    drawHeart(x, y, size) {
+        canvasCtx.fillStyle = this.color;
+        canvasCtx.moveTo(x, y + size / 4);
+        canvasCtx.bezierCurveTo(x, y, x - size / 2, y, x - size / 2, y + size / 4);
+        canvasCtx.bezierCurveTo(x - size / 2, y + size / 2, x, y + size * 0.75, x, y + size);
+        canvasCtx.bezierCurveTo(x, y + size * 0.75, x + size / 2, y + size / 2, x + size / 2, y + size / 4);
+        canvasCtx.bezierCurveTo(x + size / 2, y, x, y, x, y + size / 4);
+        canvasCtx.fill();
+    }
+}
+
+let powerReady = true;
+function triggerSnowstorm() {
+    if (!powerReady) return;
+    powerReady = false;
+    entities.forEach(e => {
+        if (e.type !== 'fireball') score += e.value;
+        e.reset();
+    });
+    scoreElement.innerText = score;
+    playSound(100, 0.6, 0.2, 'square');
+    powerBadge.innerText = "POWER-UP: COOLING";
+    powerBadge.style.color = "#ff4444";
+    setTimeout(() => {
+        powerReady = true;
+        powerBadge.innerText = "POWER-UP: READY!";
+        powerBadge.style.color = "#00ff88";
+        playSound(880, 0.2, 0.1);
+    }, 5000);
+}
+
+function updateLivesUI() {
+    livesBadge.innerText = "❤️".repeat(lives) + "🖤".repeat(3 - lives);
+}
+
+function startGame() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    document.getElementById('start-overlay').style.display = 'none';
+    gameActive = true;
+    entities = Array.from({length: ENTITY_COUNT}, () => new Entity());
+    updateLivesUI();
+}
+
+function endGame(reason) {
+    gameActive = false;
+    document.getElementById('game-over-overlay').style.display = 'flex';
+    document.getElementById('over-reason').innerText = reason;
+    document.getElementById('final-score').innerText = `Total Score: ${score}`;
+}
+
+const fingerTips = [4, 8, 12, 16, 20];
+
+
+
+function onResults(results) {
+    canvasElement.width = window.innerWidth;
+    canvasElement.height = window.innerHeight;
+    canvasCtx.save();
+    canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+    if (gameActive) {
+        entities.forEach(e => { e.update(); e.draw(); });
+
+        // Milestone Check
+        if (score >= lastHeartMilestone + 50 && score > 0) {
+            heartWaiting = true;
+            lastHeartMilestone += 50;
+        }
+
+        if (results.multiHandLandmarks) {
+            for (const landmarks of results.multiHandLandmarks) {
+                drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: '#00d4ff', lineWidth: 2});
+                
+                // Fist logic
+                const wrist = landmarks[0];
+                let curled = 0;
+                [8, 12, 16, 20].forEach(i => {
+                    if (Math.hypot(landmarks[i].x - wrist.x, landmarks[i].y - wrist.y) < 0.15) curled++;
+                });
+                if (curled >= 3 && powerReady) triggerSnowstorm();
+
+                entities.forEach(entity => {
+                    fingerTips.forEach(index => {
+                        const tip = landmarks[index];
+                        const tx = tip.x * canvasElement.width;
+                        const ty = tip.y * canvasElement.height;
+
+                        if (Math.hypot(tx - entity.x, ty - entity.y) < 45) {
+                            if (entity.type === 'fireball') {
+                                lives--;
+                                updateLivesUI();
+                                playSound(100, 0.5, 0.3, 'sawtooth');
+                                container.classList.add('shake');
+                                scoreBadge.classList.add('penalty-flash');
+                                setTimeout(() => {
+                                    container.classList.remove('shake');
+                                    scoreBadge.classList.remove('penalty-flash');
+                                }, 300);
+                                if (lives <= 0) endGame("OUT OF LIVES!");
+                            } else if (entity.type === 'heart') {
+                                if (lives < 3) lives++;
+                                updateLivesUI();
+                                playSound(600, 0.4, 0.2, 'sine');
+                                livesBadge.classList.add('heal-flash');
+                                setTimeout(() => livesBadge.classList.remove('heal-flash'), 400);
+                            } else {
+                                score += entity.value;
+                                scoreElement.innerText = score;
+                                if (entity.type === 'gold') playSound(1200, 0.3, 0.15, 'triangle');
+                                else playSound(880, 0.1, 0.1);
+                            }
+                            entity.reset();
+                        }
+                    });
+                });
+            }
+        }
+    }
+    canvasCtx.restore();
+}
+
+const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7 });
+hands.onResults(onResults);
+
+const camera = new Camera(videoElement, {
+    onFrame: async () => { await hands.send({image: videoElement}); },
+    width: 1280, height: 720
+});
+
+// Timer setup
+setInterval(() => {
+    if (gameActive && timeLeft > 0) {
+        timeLeft--;
+        timerElement.innerText = timeLeft;
+        if (timeLeft === 0) endGame("TIME'S UP!");
+    }
+}, 1000);
+
+function resetGame() {
+    score = 0; timeLeft = 60; lives = 3; lastHeartMilestone = 0; heartWaiting = false;
+    scoreElement.innerText = "0"; timerElement.innerText = "60";
+    updateLivesUI();
+    document.getElementById('game-over-overlay').style.display = 'none';
+    gameActive = true;
+}
+
+camera.start();
+</script>
+</body>
+</html>
