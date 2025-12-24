@@ -5,11 +5,10 @@ Create an interactive hand-gesture-based game with MediaPipe hand tracking and H
 
 Gameplay Overview
 Players use their hands (detected via webcam) to catch falling objects on screen:
-
-❄️ Snowflakes (+1 point) - Basic collectibles
-⭐ Gold Stars (+5 points) - High-value items
-🧨 Fireballs (-1 life) - Hazards to avoid
-❤️ Hearts - Life recovery items that appear every 50 points
+- ❄️ Snowflakes (+1 point) - Basic collectibles
+- ⭐ Gold Stars (+5 points) - High-value items
+- 🧨 Fireballs (-1 life) - Hazards to avoid
+- ❤️ Hearts - Life recovery items that appear every 50 points
 
 Key Features
 60-second timed gameplay with increasing difficulty
